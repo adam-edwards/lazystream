@@ -1,6 +1,6 @@
 use crate::{
-    log_error,
-    opt::Opt,
+    generic_stats_api, log_error,
+    opt::{Opt, Sport},
     stream::{get_master_m3u8, get_master_url, get_quality_url},
     BANNER, HOST,
 };
@@ -26,9 +26,7 @@ pub fn run(opts: Opt) {
 async fn process(opts: Opt) -> Result<(), Error> {
     println!("{}", BANNER);
 
-    let cdn: &str = opts.cdn.into();
-
-    let client = stats_api::Client::new();
+    let client = generic_stats_api::Client::new(&opts.sport);
 
     let date = if opts.date.is_some() {
         opts.date.unwrap()
@@ -63,37 +61,58 @@ async fn process(opts: Opt) -> Result<(), Error> {
 
     let game_content = client.get_game_content(game.game_pk).await?;
 
-    for epg in game_content.media.epg {
-        if epg.title == "NHLTV" {
+    let epg_vec = game_content
+        .media
+        .epg
+        .ok_or_else(|| format_err!("No streams available yet"))?;
+
+    for epg in epg_vec {
+        if epg.title == "NHLTV" || epg.title == "MLBTV" {
             if let Some(items) = epg.items {
                 println!("\nPick a stream...\n");
-
                 for (idx, stream) in items.iter().enumerate() {
-                    println!("{}) {}", idx + 1, stream.media_feed_type);
+                    let feed_type = stream
+                        .media_feed_type
+                        .clone()
+                        .ok_or_else(|| format_err!("Unexpected error, media feed type is empty"))?;
+                    println!("{}) {}", idx + 1, feed_type);
                 }
-
                 let stream_count = items.len();
                 let stream_choice = input::<usize>()
                     .msg("\n>>> ")
                     .add_test(move |input| *input > 0 && *input <= stream_count)
                     .get();
+
                 let stream = items[..]
                     .get(stream_choice - 1)
                     .ok_or_else(|| format_err!("Invalid stream choice"))?;
 
+                let stream_id = if opts.sport == Sport::Nhl {
+                    stream.media_playback_id.clone().ok_or_else(|| {
+                        format_err!("Unexpected error, stream media playback id is empty")
+                    })?
+                } else {
+                    format!(
+                        "{}",
+                        stream
+                            .id
+                            .ok_or_else(|| format_err!("Unexpected error, stream id is empty"))?
+                    )
+                };
+
                 let url = format!(
-                    "{}/getM3U8.php?league=nhl&date={}&id={}&cdn={}",
+                    "{}/getM3U8.php?league={}&date={}&id={}&cdn={}",
                     HOST,
+                    opts.sport,
                     todays_schedule.date.format("%Y-%m-%d"),
-                    stream.media_playback_id,
-                    cdn,
+                    stream_id,
+                    opts.cdn,
                 );
 
                 if let Some(ref quality) = opts.quality {
                     let master_url = get_master_url(&url).await?;
                     let master_m3u8 = get_master_m3u8(&master_url).await?;
                     let quality_url = get_quality_url(&master_url, &master_m3u8, quality.clone())?;
-
                     println!("\n{}", quality_url);
                 } else {
                     println!("\n{}", url);

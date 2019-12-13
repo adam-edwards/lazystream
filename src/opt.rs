@@ -12,6 +12,9 @@ use structopt::StructOpt;
     author = "tarkah <admin@tarkah.dev>"
 )]
 pub struct Opt {
+    #[structopt(long, parse(try_from_str), default_value = Sport::Nhl.into())]
+    /// Specify which sport to get streams for: 'mlb' or 'nhl'
+    pub sport: Sport,
     #[structopt(long, parse(try_from_str = parse_date), name = "YYYYMMDD")]
     /// Specify what date to generate stream links for, defaults to today
     pub date: Option<NaiveDate>,
@@ -54,7 +57,7 @@ fn parse_date(src: &str) -> Result<NaiveDate, ParseError> {
     NaiveDate::parse_from_str(&s, "%Y%m%d")
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Cdn {
     Akc,
     L3c,
@@ -78,6 +81,13 @@ impl FromStr for Cdn {
             "l3c" => Ok(Cdn::L3c),
             _ => bail!("Option must match 'akc' or 'l3c'"),
         }
+    }
+}
+
+impl std::fmt::Display for Cdn {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s: &str = self.clone().into();
+        write!(f, "{}", s)
     }
 }
 
@@ -125,5 +135,39 @@ impl FromStr for Quality {
                 "\n\nMust be one of: '720p60', '720p', '540p', '504p', '360p', '288p', '224p', '216p'"
             ),
         }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Sport {
+    Mlb,
+    Nhl,
+}
+
+impl From<Sport> for &str {
+    fn from(sport: Sport) -> &'static str {
+        match sport {
+            Sport::Mlb => "mlb",
+            Sport::Nhl => "nhl",
+        }
+    }
+}
+
+impl FromStr for Sport {
+    type Err = Error;
+
+    fn from_str(s: &str) -> Result<Sport, Error> {
+        match s {
+            "mlb" => Ok(Sport::Mlb),
+            "nhl" => Ok(Sport::Nhl),
+            _ => bail!("Option must match 'mlb' or 'nhl'"),
+        }
+    }
+}
+
+impl std::fmt::Display for Sport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s: &str = self.clone().into();
+        write!(f, "{}", s)
     }
 }

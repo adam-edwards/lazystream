@@ -1,6 +1,10 @@
 use crate::{
+    generic_stats_api,
+    generic_stats_api::model::{
+        GameContentArticleMediaImageCut, GameContentResponse, ScheduleGame,
+    },
     log_error,
-    opt::{Opt, Quality},
+    opt::{Cdn, Opt, Quality, Sport},
     stream::{get_master_m3u8, get_master_url, get_quality_url},
     HOST, VERSION,
 };
@@ -8,7 +12,6 @@ use async_std::{fs, sync::Mutex, task};
 use chrono::{DateTime, Local, Utc};
 use failure::Error;
 use futures::future::join_all;
-use stats_api::model::GameContentResponse;
 use std::{path::PathBuf, process};
 
 pub fn run(opts: Opt) {
@@ -28,9 +31,10 @@ async fn process(opts: Opt) -> Result<(), Error> {
     }
 
     let quality = opts.quality.clone();
-    let cdn: &str = opts.cdn.into();
+    let sport = opts.sport.clone();
+    let cdn = opts.cdn.clone();
 
-    let client = stats_api::Client::new();
+    let client = generic_stats_api::Client::new(&sport);
 
     let date = if opts.date.is_some() {
         opts.date.unwrap()
@@ -48,12 +52,13 @@ async fn process(opts: Opt) -> Result<(), Error> {
             async {
                 let game_data = GameData::new(&game);
 
-                let client = stats_api::Client::new();
+                let client = generic_stats_api::Client::new(&sport);
                 if let Ok(game_content) = client.get_game_content(game.game_pk).await {
                     let game_data = add_game_media_items(game_data, &game_content);
 
                     let game_data =
-                        add_game_streams(game_data, game_content, &date, &cdn, &quality).await;
+                        add_game_streams(game_data, game_content, &date, &cdn, &quality, &sport)
+                            .await;
 
                     games.lock().await.push(game_data);
                 }
@@ -80,14 +85,14 @@ async fn process(opts: Opt) -> Result<(), Error> {
 }
 
 fn add_game_media_items(mut game_data: GameData, game_content: &GameContentResponse) -> GameData {
-    let preview_items = &game_content.editorial.preview.items;
-    if let Some(items) = preview_items {
-        if let Some(preview) = items.first() {
-            game_data.description = Some(preview.subhead.clone());
-
-            if let Some(ref media) = preview.media {
-                if media.r#type == "photo" {
-                    game_data.cuts = Some(media.image.cuts.clone());
+    if let Some(preview) = &game_content.editorial.preview {
+        if let Some(items) = &preview.items {
+            if let Some(preview) = items.first() {
+                game_data.description = Some(preview.subhead.clone());
+                if let Some(ref media) = preview.media {
+                    if media.r#type == "photo" {
+                        game_data.cuts = Some(media.image.cuts.clone());
+                    }
                 }
             }
         }
@@ -100,56 +105,75 @@ async fn add_game_streams(
     game_data: GameData,
     game_content: GameContentResponse,
     date: &str,
-    cdn: &str,
+    cdn: &Cdn,
     quality: &Option<Quality>,
+    sport: &Sport,
 ) -> GameData {
     let game_data = Mutex::new(game_data);
 
-    let tasks: Vec<_> = game_content
-        .media
-        .epg
-        .into_iter()
-        .map(|epg| {
-            async {
-                if epg.title == "NHLTV" {
-                    if let Some(ref items) = epg.items {
-                        let mut streams = vec![];
-                        for item in items {
-                            let url = format!(
-                                "{}/getM3U8.php?league=nhl&date={}&id={}&cdn={}",
-                                HOST, &date, &item.media_playback_id, cdn,
-                            );
-
-                            if let Ok(master_url) = get_master_url(&url).await {
-                                if let Some(quality) = quality {
-                                    if let Ok(master_m3u8) = get_master_m3u8(&master_url).await {
-                                        if let Ok(quality_url) = get_quality_url(
-                                            &master_url,
-                                            &master_m3u8,
-                                            quality.clone(),
-                                        ) {
-                                            streams
-                                                .push((item.media_feed_type.clone(), quality_url));
-                                        }
+    if let Some(epg) = game_content.media.epg {
+        let tasks: Vec<_> = epg
+            .into_iter()
+            .map(|epg| {
+                async {
+                    if epg.title == "NHLTV" || epg.title == "MLBTV" {
+                        if let Some(ref items) = epg.items {
+                            let mut streams = vec![];
+                            for item in items {
+                                let stream_id = if sport == &Sport::Nhl {
+                                    if item.media_playback_id.is_some() {
+                                        item.media_playback_id.clone().unwrap()
+                                    } else {
+                                        continue;
                                     }
+                                } else if item.id.is_some() {
+                                    format!("{}", item.id.unwrap())
                                 } else {
-                                    streams.push((item.media_feed_type.clone(), master_url));
+                                    continue;
+                                };
+
+                                let feed_type = if item.media_feed_type.is_some() {
+                                    item.media_feed_type.clone().unwrap()
+                                } else {
+                                    continue;
+                                };
+
+                                let url = format!(
+                                    "{}/getM3U8.php?league={}&date={}&id={}&cdn={}",
+                                    HOST, sport, &date, stream_id, cdn,
+                                );
+
+                                if let Ok(master_url) = get_master_url(&url).await {
+                                    if let Some(quality) = quality {
+                                        if let Ok(master_m3u8) = get_master_m3u8(&master_url).await
+                                        {
+                                            if let Ok(quality_url) = get_quality_url(
+                                                &master_url,
+                                                &master_m3u8,
+                                                quality.clone(),
+                                            ) {
+                                                streams.push((feed_type.clone(), quality_url));
+                                            }
+                                        }
+                                    } else {
+                                        streams.push((feed_type.clone(), master_url));
+                                    }
                                 }
                             }
-                        }
 
-                        for (feed_type, url) in streams {
-                            let stream = Stream { feed_type, url };
-                            game_data.lock().await.streams.push(stream);
+                            for (feed_type, url) in streams {
+                                let stream = Stream { feed_type, url };
+                                game_data.lock().await.streams.push(stream);
+                            }
                         }
                     }
+                    drop(epg);
                 }
-                drop(epg);
-            }
-        })
-        .collect();
+            })
+            .collect();
 
-    join_all(tasks).await;
+        join_all(tasks).await;
+    }
 
     game_data.into_inner()
 }
@@ -299,7 +323,7 @@ struct GameData {
     description: Option<String>,
     date: DateTime<Utc>,
     streams: Vec<Stream>,
-    cuts: Option<stats_api::model::GameContentArticleMediaImageCut>,
+    cuts: Option<GameContentArticleMediaImageCut>,
 }
 
 #[derive(Debug, Clone)]
@@ -309,7 +333,7 @@ struct Stream {
 }
 
 impl GameData {
-    fn new(game: &stats_api::model::ScheduleGame) -> Self {
+    fn new(game: &ScheduleGame) -> Self {
         let home = game.teams.home.detail.name.clone();
         let away = game.teams.away.detail.name.clone();
         let date = game.date;
